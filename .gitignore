@@ -1,0 +1,24 @@
+# Gitに入れないもの
+
+# 生データの本体（DVCで管理する）。Gitに入れるのは、目印の .dvc ファイルだけ
+/data/raw/sub-*/ses-*/
+
+# dvc.yaml の処理で作り直せるもの（DVCで管理する）
+/data/derived/
+/results/alpha/
+
+# Optunaの全試行の記録。実行した時刻が入り、毎回中身が変わるので、各自のPCで作る
+/results/tuning/optuna.db
+
+# uvが作るPythonの環境（uv sync で作り直せる）
+.venv/
+
+# Pythonが自動で作るもの
+__pycache__/
+*.pyc
+
+# OSが自動で作るもの
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
