@@ -1,0 +1,64 @@
+# 処理の流れ。uv run dvc repro を実行すると、上から順に、必要な段だけを実行する。
+#   cmd：実行するコマンド
+#   deps：入力（ここに書いたファイルが変わると、この段をやり直す）
+#   params：params.yaml の中で使う設定（ここが変わっても、この段をやり直す）
+#   outs：出力（DVCが管理する。Gitには入れない）
+
+stages:
+  # 前処理：生データにフィルタをかける。3人分・6回の測定がすべてそろっている必要がある
+  preprocess:
+    cmd: python src/preprocess.py data/raw data/derived/filtered
+    deps:
+    - src/preprocess.py
+    - data/raw/sub-01/ses-01
+    - data/raw/sub-01/ses-02
+    - data/raw/sub-02/ses-01
+    - data/raw/sub-02/ses-02
+    - data/raw/sub-03/ses-01
+    - data/raw/sub-03/ses-02
+    params:
+    - preprocess
+    outs:
+    - data/derived/filtered
+
+  # 特徴量：2秒ずつの試行に切り、周波数ごとのパワーを計算する
+  features:
+    cmd: python src/features.py data/derived/filtered data/derived/features.csv
+    deps:
+    - src/features.py
+    - data/derived/filtered
+    params:
+    - features
+    outs:
+    - data/derived/features.csv
+
+  # 集計：目を開けた時・閉じた時の、後頭部のアルファ波の強さを表と図にする
+  # 出力は、表（CSV）と図（PNG）を1つずつ書く。dvc.lock に1行ずつハッシュ値が入るので、
+  # 結果が違ったときに、git diff dvc.lock でどちらが違うのかが分かる。
+  # （図のPNGは、OSが違うと、描画や圧縮のわずかな違いでバイト列が変わることがある。
+  #   表は小数点以下4桁に丸めてあるので、計算機が違っても同じになる）
+  summarize:
+    cmd: python src/summarize.py data/derived/features.csv results/alpha
+    deps:
+    - src/summarize.py
+    - data/derived/features.csv
+    params:
+    - summary
+    outs:
+    - results/alpha/alpha_summary.csv
+    - results/alpha/alpha_by_condition.png
+
+  # 探索：目を開けていたか閉じていたかを当てるモデルの設定を、Optunaで探す
+  # 最良の設定 best.json は小さい文字のファイルなので、DVCの保管場所に入れず（cache: false）、Gitで記録する。
+  # 全試行の記録 optuna.db は出力に書かない。試した時刻が入り、同じ探索でも毎回中身が変わるため
+  # （各自のPCで作って optuna-dashboard で見る。.gitignore でGitの対象外にしてある）。
+  tune:
+    cmd: python src/tune.py data/derived/features.csv results/tuning
+    deps:
+    - src/tune.py
+    - data/derived/features.csv
+    params:
+    - tuning
+    outs:
+    - results/tuning/best.json:
+        cache: false

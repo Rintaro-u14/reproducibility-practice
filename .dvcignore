@@ -1,0 +1,7 @@
+# DVCがデータとして数えないファイル。
+# OSが自動で作るファイルがデータのディレクトリに入っても、ハッシュ値が変わらないようにする。
+# （Macは「.DS_Store」や「._」で始まるファイル、Windowsは「Thumbs.db」「desktop.ini」を作ることがある）
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
