@@ -47,3 +47,10 @@ uv run mlflow server --backend-store-uri sqlite:///results/tuning/mlflow.db --ho
 ```
 
 ブラウザで http://127.0.0.1:5000/ を開き、`eyes-open-closed` を選びます。
+
+
+### ワーク4の記録を照合する
+
+親RunのArtifactsで `provenance.json` を開くと、Gitコミット、入力features.csvのSHA-256、Study名、Run ID、探索・評価条件を確認できます。`inputs/`には設定・探索コード・環境のロックファイルを保存します。SHA-256は入力を直接計算した値で、DVCのMD5とは異なります。実行後の `dvc.lock` と `best.json` をGitに記録し、採用した結果と入力・処理を対応付けます。
+
+この教材はSQLiteへ直接記録するため、MLflowのサーバーは閲覧時だけ起動すれば十分です。Git・DVCだけではMLflowの履歴は共有されません。履歴の復元にはDBと成果物の両方が必要です。

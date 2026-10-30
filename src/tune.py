@@ -63,63 +63,79 @@ def main() -> int:
     database.unlink(missing_ok=True)  # 前回の記録を消してから、探索をやり直す
     # MLflowは再実行ごとの履歴を残す。OptunaのDBとは別の保存先。
     mlflow.set_tracking_uri(f"sqlite:///{(output / 'mlflow.db').resolve().as_posix()}")
-    mlflow.set_experiment("eyes-open-closed")
-    mlflow.start_run(run_name="探索")
-    # Gitの版と入力データのハッシュを記録し、後からDVC側の記録と照合する。
-    revision = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
-    if revision.returncode == 0:
-        mlflow.set_tag("git_revision", revision.stdout.strip())
-        status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
-        if status.returncode == 0:
-            mlflow.set_tag("git_worktree_dirty", bool(status.stdout.strip()))
-    mlflow.set_tag("features_sha256", hashlib.sha256(features.read_bytes()).hexdigest())
-    mlflow.log_params({"seed": params["seed"], "n_trials": params["n_trials"],
-                       "test_subject": params["test_subject"]})
+    experiment_name = "eyes-open-closed"
+    if mlflow.get_experiment_by_name(experiment_name) is None:
+        mlflow.create_experiment(experiment_name, artifact_location=Path("mlruns").resolve().as_uri())
+    mlflow.set_experiment(experiment_name)
+    with mlflow.start_run(run_name="探索"):
+        # Gitの版と入力データのハッシュを記録し、後からDVC側の記録と照合する。
+        revision = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
+        if revision.returncode == 0:
+            mlflow.set_tag("git_revision", revision.stdout.strip())
+            status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
+            if status.returncode == 0:
+                mlflow.set_tag("git_worktree_dirty", bool(status.stdout.strip()))
+        mlflow.set_tag("features_sha256", hashlib.sha256(features.read_bytes()).hexdigest())
+        mlflow.log_params({"seed": params["seed"], "n_trials": params["n_trials"],
+                           "test_subject": params["test_subject"]})
 
-    def objective(trial: optuna.Trial) -> float:
-        low = trial.suggest_int("band_low_hz", *params["band_low_hz"])
-        width = trial.suggest_int("band_width_hz", *params["band_width_hz"])
-        c = trial.suggest_float("regularization_c", *params["regularization_c"], log=True)
-        if low + width - 1 > max_hz:
-            raise optuna.TrialPruned()  # 特徴量にない周波数を使う組み合わせは、試さずに飛ばす
-        with mlflow.start_run(run_name=f"trial-{trial.number}", nested=True):
-            mlflow.log_params({"band_low_hz": low, "band_width_hz": width, "regularization_c": c})
-            x = band_features(train, channels, low, width)
-            score = float(cross_val_score(model(c), x, y_train, groups=groups, cv=LeaveOneGroupOut()).mean())
-            mlflow.log_metric("cross_validation_accuracy", score)
-            return score
+        def objective(trial: optuna.Trial) -> float:
+            low = trial.suggest_int("band_low_hz", *params["band_low_hz"])
+            width = trial.suggest_int("band_width_hz", *params["band_width_hz"])
+            c = trial.suggest_float("regularization_c", *params["regularization_c"], log=True)
+            if low + width - 1 > max_hz:
+                raise optuna.TrialPruned()  # 特徴量にない周波数を使う組み合わせは、試さずに飛ばす
+            with mlflow.start_run(run_name=f"trial-{trial.number}", nested=True):
+                mlflow.log_params({"band_low_hz": low, "band_width_hz": width, "regularization_c": c})
+                x = band_features(train, channels, low, width)
+                score = float(cross_val_score(model(c), x, y_train, groups=groups, cv=LeaveOneGroupOut()).mean())
+                mlflow.log_metric("cross_validation_accuracy", score)
+                return score
 
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(
-        study_name="eyes-open-closed",
-        storage=f"sqlite:///{database.as_posix()}",
-        direction="maximize",
-        # 乱数の種を固定する。同じ種・同じデータなら、誰が実行しても同じ順番で同じ設定を試す
-        sampler=optuna.samplers.TPESampler(seed=params["seed"]),
-    )
-    study.optimize(objective, n_trials=params["n_trials"])
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = optuna.create_study(
+            study_name="eyes-open-closed",
+            storage=f"sqlite:///{database.as_posix()}",
+            direction="maximize",
+            # 乱数の種を固定する。データ・コード・環境・実行順序もそろえ、再現性を高める
+            sampler=optuna.samplers.TPESampler(seed=params["seed"]),
+        )
+        study.optimize(objective, n_trials=params["n_trials"])
 
-    best = study.best_params
-    # 計算機によって小数点以下のずっと先の桁が変わることがあるので、6桁に丸めて記録する
-    c = float(f"{best['regularization_c']:.6g}")
-    final = model(c).fit(band_features(train, channels, best["band_low_hz"], best["band_width_hz"]), y_train)
-    test_accuracy = final.score(band_features(test, channels, best["band_low_hz"], best["band_width_hz"]), y_test)
-    result = {
-        "best_params": {"band_low_hz": best["band_low_hz"], "band_width_hz": best["band_width_hz"], "regularization_c": c},
-        "cross_validation_accuracy": round(study.best_value, 4),
-        "test_subject": params["test_subject"],
-        "test_accuracy": round(float(test_accuracy), 4),
-        "n_trials": params["n_trials"],
-        "seed": params["seed"],
-    }
-    # 改行をLFに固定する（WindowsでもMacでも同じファイルになるように）
-    (output / "best.json").write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n",
-                                      encoding="utf-8", newline="\n")
-    mlflow.log_params({f"best_{key}": value for key, value in result["best_params"].items()})
-    mlflow.log_metrics({"best_cross_validation_accuracy": result["cross_validation_accuracy"],
-                        "test_accuracy": result["test_accuracy"]})
-    mlflow.log_artifact(str(output / "best.json"))
-    mlflow.end_run()
+        best = study.best_params
+        # 計算機によって小数点以下のずっと先の桁が変わることがあるので、6桁に丸めて記録する
+        c = float(f"{best['regularization_c']:.6g}")
+        final = model(c).fit(band_features(train, channels, best["band_low_hz"], best["band_width_hz"]), y_train)
+        test_accuracy = final.score(band_features(test, channels, best["band_low_hz"], best["band_width_hz"]), y_test)
+        result = {
+            "best_params": {"band_low_hz": best["band_low_hz"], "band_width_hz": best["band_width_hz"], "regularization_c": c},
+            "cross_validation_accuracy": round(study.best_value, 4),
+            "test_subject": params["test_subject"],
+            "test_accuracy": round(float(test_accuracy), 4),
+            "n_trials": params["n_trials"],
+            "seed": params["seed"],
+        }
+        # 改行をLFに固定する（WindowsでもMacでも同じファイルになるように）
+        (output / "best.json").write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n",
+                                          encoding="utf-8", newline="\n")
+        mlflow.log_params({f"best_{key}": value for key, value in result["best_params"].items()})
+        mlflow.log_metrics({"best_cross_validation_accuracy": result["cross_validation_accuracy"],
+                            "test_accuracy": result["test_accuracy"]})
+        mlflow.log_artifact(str(output / "best.json"))
+        # dvc.lockはDVCがコマンド終了後に更新するため、実際の入力を直接識別する。
+        provenance = {
+            "git_revision": revision.stdout.strip() if revision.returncode == 0 else None,
+            "features_sha256": hashlib.sha256(features.read_bytes()).hexdigest(),
+            "study_name": study.study_name,
+            "mlflow_run_id": mlflow.active_run().info.run_id,
+            "tuning": params,
+            "evaluation": "LeaveOneGroupOut(subject_session); held-out test_subject",
+        }
+        mlflow.log_dict(provenance, "provenance.json")
+        mlflow.log_artifact("params.yaml", artifact_path="inputs")
+        for filename in ("dvc.yaml", "uv.lock", "src/tune.py"):
+            if Path(filename).is_file():
+                mlflow.log_artifact(filename, artifact_path="inputs")
     print(f"MLflowの記録：{output / 'mlflow.db'}")
     print(f"{params['n_trials']} 回試しました。最良の設定：{result['best_params']}")
     print(f"交差検証の正答率 {result['cross_validation_accuracy']}、"
