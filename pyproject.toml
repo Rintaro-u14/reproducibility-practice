@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
   "dvc==3.67.1",
   "matplotlib>=3.9",
+  "mlflow>=3,<4",
   "numpy>=2",
   "optuna>=4",
   "pyyaml>=6",

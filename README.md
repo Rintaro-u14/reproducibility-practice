@@ -37,3 +37,13 @@ uv run dvc repro
 | `scripts/check.py` | 記録と処理結果の状態を確かめるスクリプト | 入れる |
 
 データはすべて架空です。実在する人、試料、装置、大学、研究室とは関係ありません。
+
+## MLflowの記録
+
+探索を実行すると、`results/tuning/mlflow.db` に探索ごとの設定・成績、`mlruns/` に成果物が保存されます。各自のPCに残すためGit・DVCの管理対象外です。
+
+```bash
+uv run mlflow server --backend-store-uri sqlite:///results/tuning/mlflow.db --host 127.0.0.1 --port 5000
+```
+
+ブラウザで http://127.0.0.1:5000/ を開き、`eyes-open-closed` を選びます。

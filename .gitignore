@@ -9,6 +9,8 @@
 
 # Optunaの全試行の記録。実行した時刻が入り、毎回中身が変わるので、各自のPCで作る
 /results/tuning/optuna.db
+/results/tuning/mlflow.db*
+/mlruns/
 
 # uvが作るPythonの環境（uv sync で作り直せる）
 .venv/

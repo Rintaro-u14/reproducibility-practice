@@ -18,10 +18,13 @@ test_subject は探索に一切使わず、最後に一度だけ正答率を確�
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import optuna
 import yaml
@@ -58,6 +61,20 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
     database = output / "optuna.db"
     database.unlink(missing_ok=True)  # 前回の記録を消してから、探索をやり直す
+    # MLflowは再実行ごとの履歴を残す。OptunaのDBとは別の保存先。
+    mlflow.set_tracking_uri(f"sqlite:///{(output / 'mlflow.db').resolve().as_posix()}")
+    mlflow.set_experiment("eyes-open-closed")
+    mlflow.start_run(run_name="探索")
+    # Gitの版と入力データのハッシュを記録し、後からDVC側の記録と照合する。
+    revision = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
+    if revision.returncode == 0:
+        mlflow.set_tag("git_revision", revision.stdout.strip())
+        status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
+        if status.returncode == 0:
+            mlflow.set_tag("git_worktree_dirty", bool(status.stdout.strip()))
+    mlflow.set_tag("features_sha256", hashlib.sha256(features.read_bytes()).hexdigest())
+    mlflow.log_params({"seed": params["seed"], "n_trials": params["n_trials"],
+                       "test_subject": params["test_subject"]})
 
     def objective(trial: optuna.Trial) -> float:
         low = trial.suggest_int("band_low_hz", *params["band_low_hz"])
@@ -65,8 +82,12 @@ def main() -> int:
         c = trial.suggest_float("regularization_c", *params["regularization_c"], log=True)
         if low + width - 1 > max_hz:
             raise optuna.TrialPruned()  # 特徴量にない周波数を使う組み合わせは、試さずに飛ばす
-        x = band_features(train, channels, low, width)
-        return float(cross_val_score(model(c), x, y_train, groups=groups, cv=LeaveOneGroupOut()).mean())
+        with mlflow.start_run(run_name=f"trial-{trial.number}", nested=True):
+            mlflow.log_params({"band_low_hz": low, "band_width_hz": width, "regularization_c": c})
+            x = band_features(train, channels, low, width)
+            score = float(cross_val_score(model(c), x, y_train, groups=groups, cv=LeaveOneGroupOut()).mean())
+            mlflow.log_metric("cross_validation_accuracy", score)
+            return score
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(
@@ -94,6 +115,12 @@ def main() -> int:
     # 改行をLFに固定する（WindowsでもMacでも同じファイルになるように）
     (output / "best.json").write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n",
                                       encoding="utf-8", newline="\n")
+    mlflow.log_params({f"best_{key}": value for key, value in result["best_params"].items()})
+    mlflow.log_metrics({"best_cross_validation_accuracy": result["cross_validation_accuracy"],
+                        "test_accuracy": result["test_accuracy"]})
+    mlflow.log_artifact(str(output / "best.json"))
+    mlflow.end_run()
+    print(f"MLflowの記録：{output / 'mlflow.db'}")
     print(f"{params['n_trials']} 回試しました。最良の設定：{result['best_params']}")
     print(f"交差検証の正答率 {result['cross_validation_accuracy']}、"
           f"{params['test_subject']} での正答率 {result['test_accuracy']}")
